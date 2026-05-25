@@ -79,7 +79,7 @@ Opens automatically on first run, and anytime from the tray icon
 | Setting | What it does |
 |---|---|
 | **Away Mode hotkey** | Key combo that toggles Away Mode on/off. Default `ctrl+f12`. |
-| **Pause hotkey** | Key combo that pauses/resumes scanning. Default `f8`. |
+| **Pause hotkey** | Key combo that pauses/resumes scanning. Default `ctrl+f8`. |
 | **Auto-accept: Contracts** | Accept "Contract Shared" popups. On by default. |
 | **Auto-accept: Party invites** | Accept party-invite popups. Off by default. |
 | **Auto-accept: Friend requests** | Accept friend-request popups. Off by default. |
@@ -87,7 +87,7 @@ Opens automatically on first run, and anytime from the tray icon
 **Hotkey format** — type a single key or a `+`-joined combination, for example:
 
 ```
-f8        ctrl+f12        alt+p        shift+f7
+ctrl+[f8        ctrl+f12        alt+p        shift+f7
 ```
 
 If you enter an invalid combination the script falls back to the default and
@@ -116,7 +116,7 @@ These two are not configurable:
 | Hotkey | Action |
 |---|---|
 | `Ctrl+F10` | Save a debug snapshot |
-| `F9` | Quit |
+| `[F9` | Quit |[]
 
 ### Advanced settings
 
