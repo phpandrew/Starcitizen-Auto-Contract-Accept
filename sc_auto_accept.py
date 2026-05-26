@@ -37,7 +37,7 @@ import threading
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Version of this tool. Bump this whenever the script changes.
-VERSION = "1.8"
+VERSION = "1.10"
 
 # ----------------------------------------------------------------------
 # CONFIG  -- tweak these values, then save and re-run.
@@ -65,8 +65,10 @@ ACCEPT_COOLDOWN_SECONDS = 6.0    # wait after accepting before accepting again
 
 # --- Away Mode (anti-idle) -------------------------------------------------
 AWAY_KEY = "up"                  # key tapped so the game sees you as active
-AWAY_INTERVAL_SECONDS = 240      # how often to tap it (240 = every 4 minutes)
-AWAY_MODE_AT_STARTUP = False     # start with Away Mode already on?
+AWAY_INTERVAL_SECONDS = 120      # how often to tap it (120 = every 2 minutes)
+AWAY_PRESS_COUNT = 2             # how many taps per interval
+AWAY_PRESS_GAP_SECONDS = 0.05    # gap between those taps
+AWAY_MODE_AT_STARTUP = False     # default; actual value is a saved setting
 
 # --- Detection -------------------------------------------------------------
 # Each popup type is recognised by two words appearing NEXT TO each other in
@@ -108,6 +110,7 @@ DEFAULT_SETTINGS = {
     "hide_console": False,      # fully hide the console after Start (tray only)
     "scan_interval": SCAN_INTERVAL,   # seconds between screen scans
     "monitor_index": "middle",  # "middle" auto-picks, or an int (mss id)
+    "away_mode": False,         # start with Away Mode on? (anti-idle)
 }
 
 # --- System tray -----------------------------------------------------------
@@ -502,13 +505,33 @@ def show_settings_window(settings, state=None):
     tk.OptionMenu(root, scan_var, "0.5", "1.0", "1.5", "2.0").grid(
         row=12, column=1, sticky="w", padx=8, pady=3)
 
+    # --- Away Mode (anti-idle) -------------------------------------------
+    away_mode_var = tk.BooleanVar(value=bool(settings.get("away_mode", False)))
+
+    def _on_away_mode_change(*_):
+        new_val = bool(away_mode_var.get())
+        settings["away_mode"] = new_val
+        autosave()
+        if state is not None:
+            state.away_mode = new_val
+            if new_val:
+                state.last_away_press = time.time()
+            log("Away Mode " + ("ON" if new_val else "OFF") + " (via settings).")
+
+    away_mode_var.trace_add("write", _on_away_mode_change)
+    tk.Checkbutton(root, text="Away Mode (anti-idle: taps Up x"
+                              + str(AWAY_PRESS_COUNT) + " every "
+                              + str(AWAY_INTERVAL_SECONDS // 60) + " min)",
+                   variable=away_mode_var).grid(
+        row=13, column=0, columnspan=2, sticky="w", padx=12)
+
     # --- Status + action button -----------------------------------------
     status_label = tk.Label(root, text="", font=bold)
-    status_label.grid(row=13, column=0, columnspan=2, sticky="w",
+    status_label.grid(row=14, column=0, columnspan=2, sticky="w",
                       padx=12, pady=(14, 2))
 
     action_btn = tk.Button(root, text="Start", width=18)
-    action_btn.grid(row=14, column=0, columnspan=2, pady=(2, 4))
+    action_btn.grid(row=15, column=0, columnspan=2, pady=(2, 4))
 
     def refresh_status():
         if state is None:
@@ -546,7 +569,7 @@ def show_settings_window(settings, state=None):
 
     # --- Version label (bottom-right) -----------------------------------
     tk.Label(root, text="v" + VERSION, fg="gray").grid(
-        row=15, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 8))
+        row=16, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 8))
 
     # Closing the X just closes the window; auto-save already persisted.
     root.protocol("WM_DELETE_WINDOW", root.destroy)
@@ -736,6 +759,8 @@ def register_hotkeys(state, settings):
                 + str(AWAY_INTERVAL_SECONDS // 60) + " min)")
         else:
             log("Away Mode: OFF")
+        settings["away_mode"] = state.away_mode
+        save_settings(settings)
 
     def request_quit():
         state.quit = True
@@ -872,6 +897,24 @@ def open_settings(state, settings):
     log("Auto-accepting: " + describe_enabled(settings))
 
 
+def warn_if_windows_terminal():
+    """Windows Terminal hosts the console differently from the legacy host.
+    That breaks "Hide console" and replaces the script's taskbar icon with
+    Windows Terminal's icon. We can't fix it from inside the script, so we
+    detect it and explain how to switch to the legacy console host."""
+    if os.environ.get("WT_SESSION") or os.environ.get("WT_PROFILE_ID"):
+        print("", flush=True)
+        banner(["WINDOWS TERMINAL DETECTED"])
+        log("Windows Terminal is hosting this console. Two things to know:")
+        log("  * The taskbar shows Windows Terminal's icon, NOT this app's.")
+        log("  * The 'Hide console' option in Settings cannot hide the WT tab.")
+        log("To get a proper taskbar icon and a working Hide option:")
+        log("  Windows Settings -> Privacy & security -> For developers")
+        log("  -> 'Terminal' -> change to 'Windows Console Host'.")
+        log("Then close this window and re-run from run.bat.")
+        print("", flush=True)
+
+
 def main():
     ensure_single_instance()
     setup_console()
@@ -883,6 +926,8 @@ def main():
     ])
     print("", flush=True)
 
+    warn_if_windows_terminal()
+
     configure_tesseract()
     log("Tesseract OCR found and working.")
 
@@ -892,6 +937,9 @@ def main():
     show_settings_window(settings)
 
     state = State()
+    state.away_mode = bool(settings.get("away_mode", False))
+    if state.away_mode:
+        state.last_away_press = time.time()
     register_hotkeys(state, settings)
     log("Hotkeys:  " + settings["away_hotkey"].upper() + " = away mode    "
         + settings["pause_hotkey"].upper() + " = pause    "
@@ -937,9 +985,12 @@ def main():
             if state.away_mode:
                 now = time.time()
                 if now - state.last_away_press >= AWAY_INTERVAL_SECONDS:
-                    tap_key(AWAY_KEY)
+                    for _ in range(AWAY_PRESS_COUNT):
+                        tap_key(AWAY_KEY)
+                        time.sleep(AWAY_PRESS_GAP_SECONDS)
                     state.last_away_press = now
-                    log("Away Mode: tapped '" + AWAY_KEY + "' (anti-idle).")
+                    log("Away Mode: tapped '" + AWAY_KEY + "' x"
+                        + str(AWAY_PRESS_COUNT) + " (anti-idle).")
 
             # --- settings window requested from the tray -----------------
             # Run it on a background thread so the watcher keeps scanning

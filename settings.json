@@ -6,6 +6,6 @@
   "accept_friend_requests": false,
   "verbose": false,
   "hide_console": true,
-  "scan_interval": 1.5,
+  "scan_interval": 1.0,
   "monitor_index": "middle"
 }
