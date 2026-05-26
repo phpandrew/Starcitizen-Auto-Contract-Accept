@@ -4,5 +4,8 @@
   "accept_contracts": true,
   "accept_party_invites": true,
   "accept_friend_requests": false,
-  "verbose": false
+  "verbose": false,
+  "hide_console": true,
+  "scan_interval": 1.5,
+  "monitor_index": "middle"
 }

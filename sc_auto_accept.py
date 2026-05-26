@@ -37,7 +37,7 @@ import threading
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Version of this tool. Bump this whenever the script changes.
-VERSION = "1.6"
+VERSION = "1.8"
 
 # ----------------------------------------------------------------------
 # CONFIG  -- tweak these values, then save and re-run.
@@ -51,7 +51,7 @@ MONITOR_INDEX = "middle"
 
 # Capture region as a fraction of the monitor, measured from the top-center.
 REGION_WIDTH_FRACTION  = 0.55   # 0.55 = center 55% of the monitor width
-REGION_HEIGHT_FRACTION = 0.30   # 0.30 = top 30% of the monitor height
+REGION_HEIGHT_FRACTION = 0.20   # 0.20 = top 20% of the monitor height
 
 # How often to grab and scan a screenshot, in seconds.
 SCAN_INTERVAL = 1.5
@@ -106,6 +106,8 @@ DEFAULT_SETTINGS = {
     "accept_friend_requests": False,
     "verbose": True,            # show the detailed per-scan debug log
     "hide_console": False,      # fully hide the console after Start (tray only)
+    "scan_interval": SCAN_INTERVAL,   # seconds between screen scans
+    "monitor_index": "middle",  # "middle" auto-picks, or an int (mss id)
 }
 
 # --- System tray -----------------------------------------------------------
@@ -444,13 +446,69 @@ def show_settings_window(settings, state=None):
                                   "(tray icon only - no taskbar entry)")
     make_check(10, "verbose", "Show detailed debug log (per-scan OCR text)")
 
+    # --- Monitor dropdown ------------------------------------------------
+    tk.Label(root, text="Monitor:").grid(
+        row=11, column=0, sticky="w", padx=12, pady=3)
+    try:
+        with mss.mss() as _sct_q:
+            _real_mons = _sct_q.monitors[1:]
+    except Exception:
+        _real_mons = []
+    _mon_labels = ["Auto (middle)"] + [
+        "Monitor " + str(i + 1) + "  ("
+        + str(m["width"]) + "x" + str(m["height"]) + ")"
+        for i, m in enumerate(_real_mons)
+    ]
+    _current_mon = settings.get("monitor_index", "middle")
+    if _current_mon == "middle":
+        _current_label = _mon_labels[0]
+    else:
+        try:
+            _idx = int(_current_mon)
+            _current_label = (_mon_labels[_idx]
+                              if 0 < _idx < len(_mon_labels)
+                              else _mon_labels[0])
+        except (ValueError, TypeError):
+            _current_label = _mon_labels[0]
+    monitor_var = tk.StringVar(value=_current_label)
+
+    def _on_monitor_change(*_):
+        lbl = monitor_var.get()
+        if lbl.startswith("Auto"):
+            settings["monitor_index"] = "middle"
+        else:
+            try:
+                settings["monitor_index"] = int(lbl.split()[1])
+            except (ValueError, IndexError):
+                settings["monitor_index"] = "middle"
+        autosave()
+
+    monitor_var.trace_add("write", _on_monitor_change)
+    tk.OptionMenu(root, monitor_var, *_mon_labels).grid(
+        row=11, column=1, sticky="w", padx=8, pady=3)
+
+    tk.Label(root, text="Scan every:").grid(
+        row=12, column=0, sticky="w", padx=12, pady=3)
+    scan_var = tk.StringVar(value=str(settings.get("scan_interval", 1.5)))
+
+    def _on_scan_change(*_):
+        try:
+            settings["scan_interval"] = float(scan_var.get())
+        except (ValueError, TypeError):
+            settings["scan_interval"] = 1.5
+        autosave()
+
+    scan_var.trace_add("write", _on_scan_change)
+    tk.OptionMenu(root, scan_var, "0.5", "1.0", "1.5", "2.0").grid(
+        row=12, column=1, sticky="w", padx=8, pady=3)
+
     # --- Status + action button -----------------------------------------
     status_label = tk.Label(root, text="", font=bold)
-    status_label.grid(row=11, column=0, columnspan=2, sticky="w",
+    status_label.grid(row=13, column=0, columnspan=2, sticky="w",
                       padx=12, pady=(14, 2))
 
     action_btn = tk.Button(root, text="Start", width=18)
-    action_btn.grid(row=12, column=0, columnspan=2, pady=(2, 4))
+    action_btn.grid(row=14, column=0, columnspan=2, pady=(2, 4))
 
     def refresh_status():
         if state is None:
@@ -488,7 +546,7 @@ def show_settings_window(settings, state=None):
 
     # --- Version label (bottom-right) -----------------------------------
     tk.Label(root, text="v" + VERSION, fg="gray").grid(
-        row=13, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 8))
+        row=15, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 8))
 
     # Closing the X just closes the window; auto-save already persisted.
     root.protocol("WM_DELETE_WINDOW", root.destroy)
@@ -551,7 +609,7 @@ def configure_tesseract():
     )
 
 
-def choose_monitor(sct):
+def choose_monitor(sct, setting=None):
     """Return the monitor dict to capture from."""
     monitors = sct.monitors
     real = monitors[1:]
@@ -564,7 +622,8 @@ def choose_monitor(sct):
               + str(m["top"]) + ")", flush=True)
     print("", flush=True)
 
-    setting = MONITOR_INDEX
+    if setting is None:
+        setting = MONITOR_INDEX
 
     if isinstance(setting, str) and setting.lower() == "middle":
         order = sorted(range(len(real)), key=lambda k: real[k]["left"])
@@ -865,11 +924,12 @@ def main():
             "and other options.")
 
     with mss.mss() as sct:
-        monitor = choose_monitor(sct)
+        monitor = choose_monitor(sct, settings.get("monitor_index", "middle"))
         region = make_region(monitor)
         log("Watching strip: " + str(region["width"]) + "x"
             + str(region["height"]) + " px, top-center of the monitor.")
-        log("Scanning every " + str(SCAN_INTERVAL) + "s. Switch to Star Citizen now.")
+        log("Scanning every " + str(settings["scan_interval"])
+            + "s. Switch to Star Citizen now.")
         print("", flush=True)
 
         while not state.quit:
@@ -916,7 +976,7 @@ def main():
                     ocr_text += "\n"
             except Exception as e:
                 log("OCR error: " + str(e))
-                interruptible_sleep(SCAN_INTERVAL, state)
+                interruptible_sleep(settings["scan_interval"], state)
                 continue
 
             cleaned = " ".join(ocr_text.split())
@@ -959,7 +1019,7 @@ def main():
                     status = "[away:" + ("ON" if state.away_mode else "OFF") + "]"
                     log("scanning  " + status + "  OCR: " + shown)
 
-            interruptible_sleep(SCAN_INTERVAL, state)
+            interruptible_sleep(settings["scan_interval"], state)
 
     keyboard.unhook_all()
     if tray is not None:
