@@ -3,5 +3,6 @@
   "pause_hotkey": "ctrl+f8",
   "accept_contracts": true,
   "accept_party_invites": true,
-  "accept_friend_requests": false
+  "accept_friend_requests": false,
+  "verbose": false
 }

@@ -9,8 +9,8 @@ friend request), it presses the [ key to ACCEPT it.
 Detection is done with OCR (optical character recognition) via Tesseract.
 
 Settings (away/pause hotkeys + which popups to auto-accept) live in
-settings.json next to this script. A settings window opens on the first run;
-afterwards you can change settings from the system-tray icon.
+settings.json next to this script. The settings window opens each time the
+script starts; you can also change settings from the system-tray icon.
 
 Fixed hotkeys (work even while the game has focus):
     Ctrl+F10  - save a debug snapshot of what the script is currently capturing
@@ -30,10 +30,14 @@ import json
 import ctypes
 import difflib
 import datetime
+import threading
 
 # Folder this script lives in - used for settings.json, the debug folder,
 # and the optional tray icon file.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Version of this tool. Bump this whenever the script changes.
+VERSION = "1.6"
 
 # ----------------------------------------------------------------------
 # CONFIG  -- tweak these values, then save and re-run.
@@ -81,9 +85,6 @@ OCR_BRIGHT_THRESHOLD = 190
 # mistakes on stylised game fonts; this tolerates them. 0.82 ~= 1 wrong letter.
 FUZZY_CUTOFF = 0.82
 
-# Print the raw OCR text on every scan (handy while tuning). Set False for quiet.
-VERBOSE = True
-
 # Save the captured strip to the /debug folder whenever a popup is accepted.
 SAVE_DEBUG_IMAGES = False
 
@@ -103,6 +104,8 @@ DEFAULT_SETTINGS = {
     "accept_contracts": True,
     "accept_party_invites": False,
     "accept_friend_requests": False,
+    "verbose": True,            # show the detailed per-scan debug log
+    "hide_console": False,      # fully hide the console after Start (tray only)
 }
 
 # --- System tray -----------------------------------------------------------
@@ -131,23 +134,83 @@ def setup_console():
 def get_console_window():
     """Return the handle of this script's console window (0 if there is none)."""
     try:
+        ctypes.windll.kernel32.GetConsoleWindow.restype = ctypes.c_void_p
         return ctypes.windll.kernel32.GetConsoleWindow()
     except Exception:
         return 0
 
 
 def set_console_visible(visible):
-    """Show or hide the console (log) window. The script keeps running either way."""
+    """Show or fully hide the console (log) window.
+
+    Hiding removes its taskbar entry too - the tray icon is the only access
+    point in that case. The tray menu's "Show console window" brings it back.
+    """
     hwnd = get_console_window()
     if not hwnd:
         return
     try:
-        # SW_HIDE = 0, SW_SHOW = 5
-        ctypes.windll.user32.ShowWindow(hwnd, 5 if visible else 0)
+        user32 = ctypes.windll.user32
+        user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+        # SW_SHOW = 5, SW_HIDE = 0
+        user32.ShowWindow(hwnd, 5 if visible else 0)
         if visible:
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            user32.SetForegroundWindow(hwnd)
     except Exception:
         pass
+
+
+def set_window_icon():
+    """Give the console window - and its taskbar entry - the custom app icon."""
+    hwnd = get_console_window()
+    if not hwnd:
+        return
+    for name in ("app_icon.ico", "tray_icon.ico"):
+        path = os.path.join(SCRIPT_DIR, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            user32 = ctypes.windll.user32
+            user32.LoadImageW.restype = ctypes.c_void_p
+            user32.LoadImageW.argtypes = [
+                ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint,
+                ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+            user32.SendMessageW.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+            # IMAGE_ICON = 1, LR_LOADFROMFILE = 0x10, LR_DEFAULTSIZE = 0x40
+            hicon = user32.LoadImageW(None, path, 1, 0, 0, 0x10 | 0x40)
+            if hicon:
+                # WM_SETICON = 0x80, ICON_SMALL = 0, ICON_BIG = 1
+                user32.SendMessageW(hwnd, 0x80, 0, hicon)
+                user32.SendMessageW(hwnd, 0x80, 1, hicon)
+                log("Window/taskbar icon set from " + name + ".")
+            return
+        except Exception:
+            pass
+
+
+def ensure_single_instance():
+    """Exit immediately if another copy of this script is already running."""
+    try:
+        kernel32 = ctypes.windll.kernel32
+        # Create a named mutex. If it already exists, another copy owns it.
+        kernel32.CreateMutexW(None, False, "SC_AutoAccept_SingleInstance")
+        if kernel32.GetLastError() == 183:        # ERROR_ALREADY_EXISTS
+            try:
+                ctypes.windll.user32.MessageBoxW(
+                    None,
+                    "Star Citizen Auto-Accept is already running.\n\n"
+                    "Look for its icon in the system tray.",
+                    "Already Running",
+                    0x30)                          # MB_ICONWARNING
+            except Exception:
+                pass
+            sys.exit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        pass   # never let the single-instance check block a real launch
 
 
 def stamp():
@@ -243,20 +306,27 @@ def save_settings(settings):
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as fh:
             json.dump({k: settings[k] for k in DEFAULT_SETTINGS}, fh, indent=2)
-        log("Settings saved to settings.json")
     except Exception as e:
         log("Could not save settings.json: " + str(e))
 
 
-def show_settings_window(settings):
-    """Show the settings dialog. Returns the (possibly updated) settings dict."""
+def show_settings_window(settings, state=None):
+    """Show the settings dialog with live auto-save.
+
+    Every change to a hotkey or checkbox writes settings.json immediately.
+    If `state` is given (window opened from the tray while the watcher is
+    running) the window also shows live RUNNING / PAUSED status and a
+    Pause/Resume button. If `state` is None (startup) the button reads
+    "Start" and just closes the window so the watcher can begin.
+
+    Modifies `settings` in place; also returned for convenience.
+    """
     try:
         import tkinter as tk
     except Exception:
         log("tkinter is not available - skipping the settings window.")
-        return dict(settings)
+        return settings
 
-    result = dict(settings)
     root = tk.Tk()
     root.title("Star Citizen Auto-Accept - Settings")
     root.resizable(False, False)
@@ -266,60 +336,168 @@ def show_settings_window(settings):
     except Exception:
         pass
 
+    # Use the same emblem as the tray/taskbar for the window title-bar icon.
+    try:
+        _icon_path = os.path.join(SCRIPT_DIR, "app_icon.ico")
+        if os.path.isfile(_icon_path):
+            root.iconbitmap(_icon_path)
+    except Exception:
+        pass
+
     bold = ("Segoe UI", 10, "bold")
 
+    def autosave():
+        save_settings(settings)
+
+    # Modifier keysyms reported by tkinter, mapped to keyboard-library names.
+    MOD_KEYS = {"Control_L": "ctrl", "Control_R": "ctrl",
+                "Shift_L": "shift", "Shift_R": "shift",
+                "Alt_L": "alt", "Alt_R": "alt"}
+
+    def make_hotkey_field(row, key_name):
+        """A click-to-capture hotkey box. Saves immediately on capture."""
+        entry = tk.Entry(root, width=24)
+        entry.insert(0, settings[key_name])
+        hk = {"value": settings[key_name], "mods": []}
+
+        def render(text):
+            entry.delete(0, "end")
+            entry.insert(0, text)
+
+        def on_focus_in(event):
+            hk["mods"] = []
+            render("press keys...")
+
+        def on_key_press(event):
+            ks = event.keysym
+            if ks in MOD_KEYS:
+                if MOD_KEYS[ks] not in hk["mods"]:
+                    hk["mods"].append(MOD_KEYS[ks])
+                order = [m for m in ("ctrl", "alt", "shift") if m in hk["mods"]]
+                render("+".join(order) + "+..." if order else "press keys...")
+            else:
+                order = [m for m in ("ctrl", "alt", "shift") if m in hk["mods"]]
+                combo = "+".join(order + [ks.lower()])
+                hk["value"] = combo
+                settings[key_name] = combo
+                render(combo)
+                autosave()
+            return "break"          # never type characters into the box
+
+        def on_key_release(event):
+            ks = event.keysym
+            if ks in MOD_KEYS and MOD_KEYS[ks] in hk["mods"]:
+                hk["mods"].remove(MOD_KEYS[ks])
+
+        def on_focus_out(event):
+            render(hk["value"])     # clicking away keeps the captured combo
+
+        entry.bind("<FocusIn>", on_focus_in)
+        entry.bind("<KeyPress>", on_key_press)
+        entry.bind("<KeyRelease>", on_key_release)
+        entry.bind("<FocusOut>", on_focus_out)
+        entry.grid(row=row, column=1, padx=12, pady=3)
+        return hk
+
+    def make_check(row, key_name, label_text):
+        """A checkbox that saves immediately when toggled."""
+        var = tk.BooleanVar(value=bool(settings[key_name]))
+
+        def on_change(*_):
+            settings[key_name] = bool(var.get())
+            autosave()
+
+        var.trace_add("write", on_change)
+        tk.Checkbutton(root, text=label_text, variable=var).grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=12)
+
+    # --- Hotkeys --------------------------------------------------------
     tk.Label(root, text="Hotkeys", font=bold).grid(
         row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 2))
 
     tk.Label(root, text="Away Mode hotkey:").grid(
         row=1, column=0, sticky="w", padx=12, pady=3)
-    away_var = tk.StringVar(value=settings["away_hotkey"])
-    tk.Entry(root, textvariable=away_var, width=22).grid(
-        row=1, column=1, padx=12, pady=3)
+    make_hotkey_field(1, "away_hotkey")
 
     tk.Label(root, text="Pause hotkey:").grid(
         row=2, column=0, sticky="w", padx=12, pady=3)
-    pause_var = tk.StringVar(value=settings["pause_hotkey"])
-    tk.Entry(root, textvariable=pause_var, width=22).grid(
-        row=2, column=1, padx=12, pady=3)
+    make_hotkey_field(2, "pause_hotkey")
 
-    tk.Label(root, text="examples:   f8    ctrl+f12    alt+p    shift+f7",
+    tk.Label(root, text="Click a field, press the key combination, then click "
+                        "elsewhere to set it.",
              fg="gray").grid(row=3, column=0, columnspan=2, sticky="w",
                              padx=12, pady=(0, 4))
 
+    # --- Auto-accept ----------------------------------------------------
     tk.Label(root, text="Auto-accept", font=bold).grid(
         row=4, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 2))
 
-    contracts_var = tk.BooleanVar(value=settings["accept_contracts"])
-    party_var = tk.BooleanVar(value=settings["accept_party_invites"])
-    friend_var = tk.BooleanVar(value=settings["accept_friend_requests"])
-    tk.Checkbutton(root, text="Contracts  (Contract Shared popups)",
-                   variable=contracts_var).grid(
-        row=5, column=0, columnspan=2, sticky="w", padx=12)
-    tk.Checkbutton(root, text="Party invites",
-                   variable=party_var).grid(
-        row=6, column=0, columnspan=2, sticky="w", padx=12)
-    tk.Checkbutton(root, text="Friend requests",
-                   variable=friend_var).grid(
-        row=7, column=0, columnspan=2, sticky="w", padx=12)
+    make_check(5, "accept_contracts", "Contracts  (Contract Shared popups)")
+    make_check(6, "accept_party_invites", "Party invites")
+    make_check(7, "accept_friend_requests", "Friend requests")
 
-    def on_save():
-        away = away_var.get().strip().lower()
-        pause = pause_var.get().strip().lower()
-        result["away_hotkey"] = away if away else settings["away_hotkey"]
-        result["pause_hotkey"] = pause if pause else settings["pause_hotkey"]
-        result["accept_contracts"] = bool(contracts_var.get())
-        result["accept_party_invites"] = bool(party_var.get())
-        result["accept_friend_requests"] = bool(friend_var.get())
-        root.destroy()
+    # --- Debug ----------------------------------------------------------
+    tk.Label(root, text="Debug", font=bold).grid(
+        row=8, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 2))
 
-    tk.Button(root, text="Save", width=16, command=on_save).grid(
-        row=8, column=0, columnspan=2, pady=12)
+    make_check(9, "hide_console", "Hide the console window after Start "
+                                  "(tray icon only - no taskbar entry)")
+    make_check(10, "verbose", "Show detailed debug log (per-scan OCR text)")
 
-    # Closing the window with the X behaves the same as Save.
-    root.protocol("WM_DELETE_WINDOW", on_save)
+    # --- Status + action button -----------------------------------------
+    status_label = tk.Label(root, text="", font=bold)
+    status_label.grid(row=11, column=0, columnspan=2, sticky="w",
+                      padx=12, pady=(14, 2))
+
+    action_btn = tk.Button(root, text="Start", width=18)
+    action_btn.grid(row=12, column=0, columnspan=2, pady=(2, 4))
+
+    def refresh_status():
+        if state is None:
+            status_label.config(text="Status:  not started yet", fg="#666666")
+            action_btn.config(text="Start")
+        elif getattr(state, "paused", False):
+            status_label.config(text="Status:  PAUSED", fg="#b06000")
+            action_btn.config(text="Resume scanning")
+        else:
+            status_label.config(text="Status:  RUNNING", fg="#1a7c30")
+            action_btn.config(text="Pause scanning")
+
+    def on_action():
+        if state is None:
+            root.destroy()                 # startup: closing -> start watcher
+        else:
+            state.paused = not state.paused
+            log("PAUSED (via settings window)." if state.paused
+                else "RESUMED (via settings window).")
+            refresh_status()
+
+    action_btn.config(command=on_action)
+    refresh_status()
+
+    # While running, poll state so pause changes from elsewhere (tray, hotkey)
+    # are reflected in the status label.
+    if state is not None:
+        def poll():
+            try:
+                refresh_status()
+                root.after(500, poll)
+            except Exception:
+                pass
+        root.after(500, poll)
+
+    # --- Version label (bottom-right) -----------------------------------
+    tk.Label(root, text="v" + VERSION, fg="gray").grid(
+        row=13, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 8))
+
+    # Closing the X just closes the window; auto-save already persisted.
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+    try:
+        root.focus_set()            # so no field grabs focus on open
+    except Exception:
+        pass
     root.mainloop()
-    return result
+    return settings
 
 
 class State:
@@ -332,6 +510,7 @@ class State:
         self.last_away_press = time.time()
         self.want_snapshot = False   # set by the debug hotkey / tray
         self.want_settings = False   # set by the tray "Settings" item
+        self.settings_open = False   # True while the settings window is up
         self.console_visible = True  # whether the log window is shown
 
 
@@ -563,8 +742,7 @@ def make_tray_icon(state, debug_dir):
         state.console_visible = not state.console_visible
         set_console_visible(state.console_visible)
         if not state.console_visible:
-            log("Console window hidden (tray -> Show console window to bring "
-                "it back).")
+            log("Console hidden (tray -> Show console window to bring it back).")
         else:
             log("Console window shown.")
 
@@ -584,7 +762,8 @@ def make_tray_icon(state, debug_dir):
         icon.stop()
 
     menu = pystray.Menu(
-        pystray.MenuItem("Settings...", on_settings),
+        # default=True -> double-click on the tray icon opens Settings.
+        pystray.MenuItem("Settings...", on_settings, default=True),
         pystray.MenuItem(
             lambda item: "Resume scanning" if state.paused else "Pause scanning",
             on_toggle_pause),
@@ -624,10 +803,9 @@ def describe_enabled(settings):
 
 
 def open_settings(state, settings):
-    """Show the settings window, save, and re-apply hotkeys. Runs on main thread."""
+    """Show the settings window, then re-apply hotkeys. Runs on main thread."""
     log("Opening settings window...")
-    settings.update(show_settings_window(settings))
-    save_settings(settings)
+    show_settings_window(settings, state)
     keyboard.unhook_all()
     register_hotkeys(state, settings)
     log("Settings applied.  Hotkeys: " + settings["away_hotkey"].upper()
@@ -636,9 +814,11 @@ def open_settings(state, settings):
 
 
 def main():
+    ensure_single_instance()
     setup_console()
+    set_window_icon()
     banner([
-        "STAR CITIZEN  -  AUTO-ACCEPT",
+        "STAR CITIZEN  -  AUTO-ACCEPT   v" + VERSION,
         "",
         "Right-click the tray icon for Settings, Pause, and Exit.",
     ])
@@ -647,13 +827,10 @@ def main():
     configure_tesseract()
     log("Tesseract OCR found and working.")
 
-    # Load settings; on the very first run, pop up the settings window.
-    first_run = not os.path.isfile(SETTINGS_FILE)
+    # Always open the settings window when the script starts.
     settings = load_settings()
-    if first_run:
-        log("First run - opening the settings window...")
-        settings.update(show_settings_window(settings))
-        save_settings(settings)
+    log("Opening the settings window...")
+    show_settings_window(settings)
 
     state = State()
     register_hotkeys(state, settings)
@@ -675,6 +852,18 @@ def main():
     elif ENABLE_TRAY_ICON and not HAVE_PYSTRAY:
         log("Tray icon off - run install_requirements.bat to enable it.")
 
+    # After Start: apply the hide_console preference. When hidden, the
+    # console disappears completely (no taskbar entry) and the tray icon
+    # becomes the only access point. When not hidden, the console stays
+    # visible so its taskbar entry is your "running" indicator.
+    if settings.get("hide_console", False):
+        log("Hiding the console - right-click the tray icon for Settings.")
+        state.console_visible = False
+        set_console_visible(False)
+    else:
+        log("Console stays visible. Right-click the tray icon for Settings "
+            "and other options.")
+
     with mss.mss() as sct:
         monitor = choose_monitor(sct)
         region = make_region(monitor)
@@ -693,9 +882,23 @@ def main():
                     log("Away Mode: tapped '" + AWAY_KEY + "' (anti-idle).")
 
             # --- settings window requested from the tray -----------------
+            # Run it on a background thread so the watcher keeps scanning
+            # while the window is open. tkinter is happy as long as each
+            # root only ever talks to its own (creating) thread, which it
+            # does here.
             if state.want_settings:
                 state.want_settings = False
-                open_settings(state, settings)
+                if not state.settings_open:
+                    state.settings_open = True
+
+                    def _settings_thread():
+                        try:
+                            open_settings(state, settings)
+                        finally:
+                            state.settings_open = False
+
+                    threading.Thread(target=_settings_thread,
+                                     daemon=True).start()
 
             if state.paused:
                 time.sleep(0.2)
@@ -739,7 +942,7 @@ def main():
 
             if label:
                 if time.time() - state.last_accept < ACCEPT_COOLDOWN_SECONDS:
-                    if VERBOSE:
+                    if settings["verbose"]:
                         log(label + " popup still on screen - cooldown, skipping.")
                 else:
                     log(label + ' detected. OCR read: "' + cleaned + '"')
@@ -749,7 +952,7 @@ def main():
                         image.save(os.path.join(debug_dir, fname))
                     do_accept(state, label)
             else:
-                if VERBOSE:
+                if settings["verbose"]:
                     shown = cleaned if cleaned else "(no text)"
                     if len(shown) > 60:
                         shown = shown[:60] + "..."
