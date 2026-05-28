@@ -37,7 +37,7 @@ import threading
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Version of this tool. Bump this whenever the script changes.
-VERSION = "1.10"
+VERSION = "1.12"
 
 # ----------------------------------------------------------------------
 # CONFIG  -- tweak these values, then save and re-run.
@@ -445,8 +445,29 @@ def show_settings_window(settings, state=None):
     tk.Label(root, text="Debug", font=bold).grid(
         row=8, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 2))
 
-    make_check(9, "hide_console", "Hide the console window after Start "
-                                  "(tray icon only - no taskbar entry)")
+    # Hide-console checkbox: applies live (shows or hides the window now too).
+    hide_console_var = tk.BooleanVar(
+        value=bool(settings.get("hide_console", False)))
+    _syncing_hide = [False]
+
+    def _on_hide_console_change(*_):
+        if _syncing_hide[0]:
+            return
+        new_val = bool(hide_console_var.get())
+        settings["hide_console"] = new_val
+        autosave()
+        if state is not None:
+            state.console_visible = not new_val
+            set_console_visible(state.console_visible)
+            log("Console " + ("hidden" if new_val else "shown")
+                + " (via settings).")
+
+    hide_console_var.trace_add("write", _on_hide_console_change)
+    tk.Checkbutton(root, text="Hide the console window after Start "
+                              "(tray icon only - no taskbar entry)",
+                   variable=hide_console_var).grid(
+        row=9, column=0, columnspan=2, sticky="w", padx=12)
+
     make_check(10, "verbose", "Show detailed debug log (per-scan OCR text)")
 
     # --- Monitor dropdown ------------------------------------------------
@@ -507,8 +528,13 @@ def show_settings_window(settings, state=None):
 
     # --- Away Mode (anti-idle) -------------------------------------------
     away_mode_var = tk.BooleanVar(value=bool(settings.get("away_mode", False)))
+    # Used to suppress the trace callback when WE update the var to mirror
+    # state changes (so we don't loop or double-log).
+    _syncing_away = [False]
 
     def _on_away_mode_change(*_):
+        if _syncing_away[0]:
+            return
         new_val = bool(away_mode_var.get())
         settings["away_mode"] = new_val
         autosave()
@@ -543,6 +569,20 @@ def show_settings_window(settings, state=None):
         else:
             status_label.config(text="Status:  RUNNING", fg="#1a7c30")
             action_btn.config(text="Pause scanning")
+        # Mirror state.away_mode into the checkbox (so a hotkey/tray toggle
+        # is reflected here too).
+        if state is not None and bool(state.away_mode) != bool(away_mode_var.get()):
+            _syncing_away[0] = True
+            away_mode_var.set(bool(state.away_mode))
+            _syncing_away[0] = False
+        # Mirror state.console_visible into the hide-console checkbox.
+        # The checkbox is "hidden" = True when console is NOT visible.
+        if state is not None:
+            want_hidden = bool(not state.console_visible)
+            if want_hidden != bool(hide_console_var.get()):
+                _syncing_hide[0] = True
+                hide_console_var.set(want_hidden)
+                _syncing_hide[0] = False
 
     def on_action():
         if state is None:
@@ -807,7 +847,7 @@ def load_tray_image():
     return img
 
 
-def make_tray_icon(state, debug_dir):
+def make_tray_icon(state, debug_dir, settings):
     """Build a system-tray icon with a right-click menu, or None if unavailable."""
     if not (ENABLE_TRAY_ICON and HAVE_PYSTRAY):
         return None
@@ -829,6 +869,9 @@ def make_tray_icon(state, debug_dir):
             log("Console hidden (tray -> Show console window to bring it back).")
         else:
             log("Console window shown.")
+        # Mirror the change into the saved setting so the next launch matches.
+        settings["hide_console"] = not state.console_visible
+        save_settings(settings)
 
     def on_snapshot(icon, item):
         state.want_snapshot = True
@@ -952,7 +995,7 @@ def main():
     if not os.path.isdir(debug_dir):
         os.makedirs(debug_dir, exist_ok=True)
 
-    tray = make_tray_icon(state, debug_dir)
+    tray = make_tray_icon(state, debug_dir, settings)
     if tray is not None:
         tray.run_detached()
         log("System tray icon active - right-click it for menu options.")
