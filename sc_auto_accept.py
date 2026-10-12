@@ -37,7 +37,7 @@ import threading
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Version of this tool. Bump this whenever the script changes.
-VERSION = "1.12"
+VERSION = "1.14"
 
 # ----------------------------------------------------------------------
 # CONFIG  -- tweak these values, then save and re-run.
@@ -111,6 +111,7 @@ DEFAULT_SETTINGS = {
     "scan_interval": SCAN_INTERVAL,   # seconds between screen scans
     "monitor_index": "middle",  # "middle" auto-picks, or an int (mss id)
     "away_mode": False,         # start with Away Mode on? (anti-idle)
+    "dark_mode": True,          # dark theme for the Settings window
 }
 
 # --- System tray -----------------------------------------------------------
@@ -316,32 +317,46 @@ def save_settings(settings):
 
 
 def show_settings_window(settings, state=None):
-    """Show the settings dialog with live auto-save.
+    """Show the settings window (live auto-save).
 
-    Every change to a hotkey or checkbox writes settings.json immediately.
-    If `state` is given (window opened from the tray while the watcher is
-    running) the window also shows live RUNNING / PAUSED status and a
-    Pause/Resume button. If `state` is None (startup) the button reads
-    "Start" and just closes the window so the watcher can begin.
+    Every change writes settings.json immediately. If `state` is given (window
+    opened from the tray while the watcher is running) the footer shows live
+    Running / Paused status and a Pause/Resume button. If `state` is None
+    (startup) the button reads "Start" and closes the window so the watcher
+    can begin.
+
+    Built with plain tkinter + Pillow (both already required). Rounded cards,
+    toggle switches and buttons are drawn with Pillow at 4x and scaled down
+    so the edges stay smooth.
 
     Modifies `settings` in place; also returned for convenience.
     """
     try:
         import tkinter as tk
+        import tkinter.font as tkfont
+        from PIL import ImageTk
     except Exception:
-        log("tkinter is not available - skipping the settings window.")
+        log("tkinter / Pillow ImageTk not available - skipping the settings window.")
         return settings
 
+    # Crisp rendering on high-DPI screens (mss does the same when it starts).
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
     root = tk.Tk()
-    root.title("Star Citizen Auto-Accept - Settings")
+    root.withdraw()
+    root.title("Star Citizen Auto-Accept")
     root.resizable(False, False)
     try:
         root.attributes("-topmost", True)
-        root.lift()
     except Exception:
         pass
-
-    # Use the same emblem as the tray/taskbar for the window title-bar icon.
     try:
         _icon_path = os.path.join(SCRIPT_DIR, "app_icon.ico")
         if os.path.isfile(_icon_path):
@@ -349,130 +364,173 @@ def show_settings_window(settings, state=None):
     except Exception:
         pass
 
-    bold = ("Segoe UI", 10, "bold")
+    SCALE = max(1.0, root.winfo_fpixels("1i") / 96.0)
+
+    def px(v):
+        return int(round(v * SCALE))
+
+    _fams = set(tkfont.families(root))
+
+    def _pick_font(*names):
+        for n in names:
+            if n in _fams:
+                return n
+        return "Segoe UI"
+
+    FONT = _pick_font("Segoe UI Variable Text", "Segoe UI")
+    FONT_DISPLAY = _pick_font("Segoe UI Variable Display", "Segoe UI")
+    F_TITLE = (FONT_DISPLAY, 20, "bold")
+    F_SUB = (FONT, 11)
+    F_HEAD = (FONT, 12, "bold")
+    F_ROW = (FONT, 11)
+    F_DESC = (FONT, 10)
+    F_BTN = (FONT, 11)
+    F_STATUS = (FONT, 11, "bold")
+
+    # --- Theming --------------------------------------------------------
+    THEMES = {
+        "dark": {
+            "win": "#0f131a", "card": "#161b23", "card_border": "#262d38",
+            "sep": "#232a35", "fg": "#e9ecf1", "hint": "#9aa5b4",
+            "field_bg": "#12161d", "field_border": "#3a414d",
+            "field_hover": "#59616f", "accent": "#2f7bf5",
+            "accent_hover": "#4a8dff", "track_off": "#3b414c",
+            "knob": "#ffffff", "chevron": "#c5ccd6", "btn_fg": "#ffffff",
+            "run": "#3ad35f", "paused": "#f0a43a", "idle": "#9aa5b4",
+            "menu_bg": "#1c222c",
+        },
+        "light": {
+            "win": "#eef1f5", "card": "#ffffff", "card_border": "#dde2e9",
+            "sep": "#e8ebf0", "fg": "#14181f", "hint": "#5d6878",
+            "field_bg": "#ffffff", "field_border": "#c9d0da",
+            "field_hover": "#9aa5b4", "accent": "#2563eb",
+            "accent_hover": "#3b76f0", "track_off": "#c4cbd5",
+            "knob": "#ffffff", "chevron": "#4b5563", "btn_fg": "#ffffff",
+            "run": "#16a34a", "paused": "#c2700a", "idle": "#5d6878",
+            "menu_bg": "#ffffff",
+        },
+    }
+
+    def T():
+        return THEMES["dark" if settings.get("dark_mode", True) else "light"]
+
+    # --- Pillow-drawn shapes (supersampled for smooth edges) -------------
+    SS = 4
+    _img_cache = {}
+
+    def _canvas(w, h, bg):
+        img = Image.new("RGB", (w * SS, h * SS), bg)
+        return img, ImageDraw.Draw(img)
+
+    def _finish(img, w, h, key):
+        photo = ImageTk.PhotoImage(img.resize((w, h), Image.LANCZOS),
+                                   master=root)
+        _img_cache[key] = photo
+        return photo
+
+    def rrect(w, h, r, fill, bg, outline=None, ow=1.0):
+        """Rounded rectangle. w/h in real pixels, r and ow in logical px."""
+        key = ("rr", w, h, r, fill, bg, outline, ow)
+        if key in _img_cache:
+            return _img_cache[key]
+        img, d = _canvas(w, h, bg)
+        kw = {"fill": fill}
+        if outline:
+            kw["outline"] = outline
+            kw["width"] = max(SS, int(round(ow * SCALE * SS)))
+        d.rounded_rectangle((0, 0, w * SS - 1, h * SS - 1),
+                            radius=int(px(r) * SS), **kw)
+        return _finish(img, w, h, key)
+
+    def toggle_img(on):
+        t = T()
+        w, h = px(46), px(26)
+        key = ("tg", on, w, h, t["card"], t["accent"], t["track_off"])
+        if key in _img_cache:
+            return _img_cache[key]
+        img, d = _canvas(w, h, t["card"])
+        d.rounded_rectangle((0, 0, w * SS - 1, h * SS - 1),
+                            radius=h * SS // 2,
+                            fill=t["accent"] if on else t["track_off"])
+        m = px(3) * SS
+        dia = h * SS - 2 * m
+        x0 = (w * SS - m - dia) if on else m
+        d.ellipse((x0, m, x0 + dia, m + dia), fill=t["knob"])
+        return _finish(img, w, h, key)
+
+    def dot_img(color, bg):
+        n = px(18)
+        key = ("dot", n, color, bg)
+        if key in _img_cache:
+            return _img_cache[key]
+        img, d = _canvas(n, n, bg)
+        d.ellipse((0, 0, n * SS - 1, n * SS - 1), fill=color)
+        return _finish(img, n, n, key)
+
+    def chevron_img(direction, color, bg, box=16, thick=1.7):
+        n = px(box)
+        key = ("chev", direction, n, color, bg, thick)
+        if key in _img_cache:
+            return _img_cache[key]
+        img, d = _canvas(n, n, bg)
+        S = n * SS
+        a, b, mid = S * 0.22, S * 0.78, S * 0.5
+        q, r = S * 0.36, S * 0.64
+        pts = {"down": [(a, q), (mid, r), (b, q)],
+               "up": [(a, r), (mid, q), (b, r)],
+               "right": [(q, a), (r, mid), (q, b)]}[direction]
+        lw = max(SS, int(thick * SCALE * SS))
+        d.line(pts, fill=color, width=lw, joint="curve")
+        for (x, y) in (pts[0], pts[-1]):          # round line caps
+            d.ellipse((x - lw / 2, y - lw / 2, x + lw / 2, y + lw / 2),
+                      fill=color)
+        return _finish(img, n, n, key)
 
     def autosave():
         save_settings(settings)
 
-    # Modifier keysyms reported by tkinter, mapped to keyboard-library names.
-    MOD_KEYS = {"Control_L": "ctrl", "Control_R": "ctrl",
-                "Shift_L": "shift", "Shift_R": "shift",
-                "Alt_L": "alt", "Alt_R": "alt"}
+    # --- Setting variables (created once; survive theme rebuilds) -------
+    _sync = {"on": False}       # True while WE mirror state into a variable
 
-    def make_hotkey_field(row, key_name):
-        """A click-to-capture hotkey box. Saves immediately on capture."""
-        entry = tk.Entry(root, width=24)
-        entry.insert(0, settings[key_name])
-        hk = {"value": settings[key_name], "mods": []}
+    def bool_var(key, default=False, on_change=None):
+        v = tk.BooleanVar(master=root, value=bool(settings.get(key, default)))
 
-        def render(text):
-            entry.delete(0, "end")
-            entry.insert(0, text)
-
-        def on_focus_in(event):
-            hk["mods"] = []
-            render("press keys...")
-
-        def on_key_press(event):
-            ks = event.keysym
-            if ks in MOD_KEYS:
-                if MOD_KEYS[ks] not in hk["mods"]:
-                    hk["mods"].append(MOD_KEYS[ks])
-                order = [m for m in ("ctrl", "alt", "shift") if m in hk["mods"]]
-                render("+".join(order) + "+..." if order else "press keys...")
-            else:
-                order = [m for m in ("ctrl", "alt", "shift") if m in hk["mods"]]
-                combo = "+".join(order + [ks.lower()])
-                hk["value"] = combo
-                settings[key_name] = combo
-                render(combo)
-                autosave()
-            return "break"          # never type characters into the box
-
-        def on_key_release(event):
-            ks = event.keysym
-            if ks in MOD_KEYS and MOD_KEYS[ks] in hk["mods"]:
-                hk["mods"].remove(MOD_KEYS[ks])
-
-        def on_focus_out(event):
-            render(hk["value"])     # clicking away keeps the captured combo
-
-        entry.bind("<FocusIn>", on_focus_in)
-        entry.bind("<KeyPress>", on_key_press)
-        entry.bind("<KeyRelease>", on_key_release)
-        entry.bind("<FocusOut>", on_focus_out)
-        entry.grid(row=row, column=1, padx=12, pady=3)
-        return hk
-
-    def make_check(row, key_name, label_text):
-        """A checkbox that saves immediately when toggled."""
-        var = tk.BooleanVar(value=bool(settings[key_name]))
-
-        def on_change(*_):
-            settings[key_name] = bool(var.get())
+        def _cb(*_):
+            if _sync["on"]:
+                return
+            new_val = bool(v.get())
+            settings[key] = new_val
             autosave()
+            if on_change:
+                on_change(new_val)
 
-        var.trace_add("write", on_change)
-        tk.Checkbutton(root, text=label_text, variable=var).grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=12)
+        v.trace_add("write", _cb)
+        return v
 
-    # --- Hotkeys --------------------------------------------------------
-    tk.Label(root, text="Hotkeys", font=bold).grid(
-        row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 2))
+    def _away_changed(new_val):
+        if state is not None:
+            state.away_mode = new_val
+            if new_val:
+                state.last_away_press = time.time()
+            log("Away Mode " + ("ON" if new_val else "OFF") + " (via settings).")
 
-    tk.Label(root, text="Away Mode hotkey:").grid(
-        row=1, column=0, sticky="w", padx=12, pady=3)
-    make_hotkey_field(1, "away_hotkey")
-
-    tk.Label(root, text="Pause hotkey:").grid(
-        row=2, column=0, sticky="w", padx=12, pady=3)
-    make_hotkey_field(2, "pause_hotkey")
-
-    tk.Label(root, text="Click a field, press the key combination, then click "
-                        "elsewhere to set it.",
-             fg="gray").grid(row=3, column=0, columnspan=2, sticky="w",
-                             padx=12, pady=(0, 4))
-
-    # --- Auto-accept ----------------------------------------------------
-    tk.Label(root, text="Auto-accept", font=bold).grid(
-        row=4, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 2))
-
-    make_check(5, "accept_contracts", "Contracts  (Contract Shared popups)")
-    make_check(6, "accept_party_invites", "Party invites")
-    make_check(7, "accept_friend_requests", "Friend requests")
-
-    # --- Debug ----------------------------------------------------------
-    tk.Label(root, text="Debug", font=bold).grid(
-        row=8, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 2))
-
-    # Hide-console checkbox: applies live (shows or hides the window now too).
-    hide_console_var = tk.BooleanVar(
-        value=bool(settings.get("hide_console", False)))
-    _syncing_hide = [False]
-
-    def _on_hide_console_change(*_):
-        if _syncing_hide[0]:
-            return
-        new_val = bool(hide_console_var.get())
-        settings["hide_console"] = new_val
-        autosave()
+    def _hide_changed(new_val):
         if state is not None:
             state.console_visible = not new_val
             set_console_visible(state.console_visible)
             log("Console " + ("hidden" if new_val else "shown")
                 + " (via settings).")
 
-    hide_console_var.trace_add("write", _on_hide_console_change)
-    tk.Checkbutton(root, text="Hide the console window after Start "
-                              "(tray icon only - no taskbar entry)",
-                   variable=hide_console_var).grid(
-        row=9, column=0, columnspan=2, sticky="w", padx=12)
+    contracts_var = bool_var("accept_contracts", True)
+    party_var = bool_var("accept_party_invites", True)
+    friend_var = bool_var("accept_friend_requests", False)
+    away_var = bool_var("away_mode", False, _away_changed)
+    hide_var = bool_var("hide_console", False, _hide_changed)
+    verbose_var = bool_var("verbose", False)
+    dark_var = bool_var("dark_mode", True,
+                        lambda _v: root.after_idle(build))
 
-    make_check(10, "verbose", "Show detailed debug log (per-scan OCR text)")
-
-    # --- Monitor dropdown ------------------------------------------------
-    tk.Label(root, text="Monitor:").grid(
-        row=11, column=0, sticky="w", padx=12, pady=3)
+    # Monitor list
     try:
         with mss.mss() as _sct_q:
             _real_mons = _sct_q.monitors[1:]
@@ -484,17 +542,15 @@ def show_settings_window(settings, state=None):
         for i, m in enumerate(_real_mons)
     ]
     _current_mon = settings.get("monitor_index", "middle")
-    if _current_mon == "middle":
-        _current_label = _mon_labels[0]
-    else:
+    _current_label = _mon_labels[0]
+    if _current_mon != "middle":
         try:
             _idx = int(_current_mon)
-            _current_label = (_mon_labels[_idx]
-                              if 0 < _idx < len(_mon_labels)
-                              else _mon_labels[0])
+            if 0 < _idx < len(_mon_labels):
+                _current_label = _mon_labels[_idx]
         except (ValueError, TypeError):
-            _current_label = _mon_labels[0]
-    monitor_var = tk.StringVar(value=_current_label)
+            pass
+    monitor_var = tk.StringVar(master=root, value=_current_label)
 
     def _on_monitor_change(*_):
         lbl = monitor_var.get()
@@ -508,81 +564,367 @@ def show_settings_window(settings, state=None):
         autosave()
 
     monitor_var.trace_add("write", _on_monitor_change)
-    tk.OptionMenu(root, monitor_var, *_mon_labels).grid(
-        row=11, column=1, sticky="w", padx=8, pady=3)
 
-    tk.Label(root, text="Scan every:").grid(
-        row=12, column=0, sticky="w", padx=12, pady=3)
-    scan_var = tk.StringVar(value=str(settings.get("scan_interval", 1.5)))
+    SCAN_MIN, SCAN_MAX, SCAN_STEP = 0.5, 5.0, 0.5
+    ui = {}
+    _ui_state = {"advanced_open": True}
 
-    def _on_scan_change(*_):
+    def set_scan(v):
+        v = min(SCAN_MAX, max(SCAN_MIN, v))
+        v = round(round(v / SCAN_STEP) * SCAN_STEP, 2)
+        settings["scan_interval"] = v
+        autosave()
+        if "scan_redraw" in ui:
+            ui["scan_redraw"]()
+
+    def cur_scan():
         try:
-            settings["scan_interval"] = float(scan_var.get())
+            return float(settings.get("scan_interval", 1.5))
         except (ValueError, TypeError):
-            settings["scan_interval"] = 1.5
-        autosave()
+            return 1.5
 
-    scan_var.trace_add("write", _on_scan_change)
-    tk.OptionMenu(root, scan_var, "0.5", "1.0", "1.5", "2.0").grid(
-        row=12, column=1, sticky="w", padx=8, pady=3)
+    MOD_KEYS = {"Control_L": "ctrl", "Control_R": "ctrl",
+                "Shift_L": "shift", "Shift_R": "shift",
+                "Alt_L": "alt", "Alt_R": "alt"}
 
-    # --- Away Mode (anti-idle) -------------------------------------------
-    away_mode_var = tk.BooleanVar(value=bool(settings.get("away_mode", False)))
-    # Used to suppress the trace callback when WE update the var to mirror
-    # state changes (so we don't loop or double-log).
-    _syncing_away = [False]
+    def pretty_combo(combo):
+        out = []
+        for p in [p for p in str(combo).split("+") if p]:
+            if len(p) == 1 or (p[0] in "fF" and p[1:].isdigit()):
+                out.append(p.upper())
+            else:
+                out.append(p[:1].upper() + p[1:])
+        return " + ".join(out)
 
-    def _on_away_mode_change(*_):
-        if _syncing_away[0]:
+    # --- Widgets ----------------------------------------------------------
+    _hotkey_canvases = []
+
+    class Card:
+        """Rounded card: a canvas with a Pillow background and a Frame on top."""
+        PADX, PADT, PADB = 18, 11, 4
+
+        def __init__(self, parent, title, collapsible=False):
+            t = T()
+            self.t = t
+            self.canvas = tk.Canvas(parent, width=ui["card_w"], height=px(40),
+                                    bg=t["win"], highlightthickness=0, bd=0)
+            self.canvas.pack(fill="x", pady=(0, px(8)))
+            self.bg_item = self.canvas.create_image(0, 0, anchor="nw")
+            self.inner = tk.Frame(self.canvas, bg=t["card"])
+            self.win = self.canvas.create_window(px(self.PADX), px(self.PADT),
+                                                 anchor="nw", window=self.inner)
+            self._last = None
+            self.rows = 0
+            ui.setdefault("cards", []).append(self)
+
+            head = tk.Frame(self.inner, bg=t["card"])
+            head.pack(fill="x", pady=(0, px(2)))
+            title_lbl = tk.Label(head, text=title, font=F_HEAD, bg=t["card"],
+                                 fg=t["fg"], anchor="w")
+            title_lbl.pack(side="left")
+            self.body = tk.Frame(self.inner, bg=t["card"])
+            self.body.pack(fill="x")
+
+            if collapsible:
+                chev = tk.Label(head, bg=t["card"], cursor="hand2")
+                chev.pack(side="right")
+
+                def paint():
+                    chev.configure(image=chevron_img(
+                        "down" if _ui_state["advanced_open"] else "right",
+                        t["chevron"], t["card"]))
+                    if _ui_state["advanced_open"]:
+                        self.body.pack(fill="x")
+                    else:
+                        self.body.pack_forget()
+
+                def flip(_e=None):
+                    _ui_state["advanced_open"] = not _ui_state["advanced_open"]
+                    paint()
+
+                for w in (head, title_lbl, chev):
+                    w.bind("<Button-1>", flip)
+                title_lbl.configure(cursor="hand2")
+                paint()
+
+            self.canvas.bind("<Configure>", self._layout)
+            self.inner.bind("<Configure>", self._layout)
+
+        def _layout(self, _e=None):
+            cw = self.canvas.winfo_width()
+            if cw <= 1:
+                cw = ui["card_w"]
+            self.canvas.itemconfigure(self.win, width=cw - 2 * px(self.PADX))
+            ch = self.inner.winfo_reqheight() + px(self.PADT) + px(self.PADB)
+            if int(float(self.canvas.cget("height"))) != ch:
+                self.canvas.configure(height=ch)
+            if self._last != (cw, ch):
+                self._last = (cw, ch)
+                self.canvas.itemconfigure(self.bg_item, image=rrect(
+                    cw, ch, 12, self.t["card"], self.t["win"],
+                    self.t["card_border"], 1))
+
+        def row(self, label, desc=None):
+            t = self.t
+            if self.rows:
+                tk.Frame(self.body, bg=t["sep"], height=max(1, px(1))).pack(fill="x")
+            self.rows += 1
+            r = tk.Frame(self.body, bg=t["card"])
+            r.pack(fill="x", pady=px(6))
+            lbl = tk.Label(r, text=label, font=F_ROW, bg=t["card"], fg=t["fg"])
+            lbl.pack(side="left")
+            if desc:
+                tk.Frame(r, bg=t["field_border"], width=max(1, px(1)),
+                         height=px(24)).pack(side="left", padx=px(14))
+                tk.Label(r, text=desc, font=F_DESC, bg=t["card"],
+                         fg=t["hint"]).pack(side="left")
+            r.label = lbl
+            return r
+
+        def toggle_row(self, label, var, desc=None):
+            r = self.row(label, desc)
+            make_toggle(r, var).pack(side="right")
+            r.label.bind("<Button-1>", lambda e: var.set(not bool(var.get())))
+            r.label.configure(cursor="hand2")
+            return r
+
+        def note(self, text):
+            tk.Label(self.body, text=text, font=F_DESC, bg=self.t["card"],
+                     fg=self.t["hint"], anchor="w").pack(fill="x", pady=(0, px(8)))
+
+    def make_toggle(parent, var):
+        t = T()
+        lbl = tk.Label(parent, bg=t["card"], bd=0, cursor="hand2")
+
+        def draw(*_):
+            try:
+                lbl.configure(image=toggle_img(bool(var.get())))
+            except Exception:
+                pass
+
+        lbl.bind("<Button-1>", lambda e: var.set(not bool(var.get())))
+        tid = var.trace_add("write", draw)
+
+        def _cleanup(_e):
+            try:
+                var.trace_remove("write", tid)
+            except Exception:
+                pass
+
+        lbl.bind("<Destroy>", _cleanup)
+        draw()
+        return lbl
+
+    def field(parent, w, h, cursor="hand2", takefocus=0):
+        t = T()
+        c = tk.Canvas(parent, width=w, height=h, bg=t["card"], bd=0,
+                      highlightthickness=0, cursor=cursor, takefocus=takefocus)
+        bg = c.create_image(0, 0, anchor="nw")
+
+        def border(color, ow=1.0):
+            c.itemconfigure(bg, image=rrect(w, h, 6, t["field_bg"], t["card"],
+                                            color, ow))
+
+        border(t["field_border"])
+        return c, border
+
+    def make_dropdown(parent):
+        t = T()
+        w, h = px(210), px(36)
+        c, border = field(parent, w, h)
+        txt = c.create_text(px(14), h // 2, anchor="w", font=F_ROW,
+                            fill=t["fg"], text=monitor_var.get())
+        c.create_image(w - px(22), h // 2,
+                       image=chevron_img("down", t["chevron"], t["field_bg"]))
+        menu = tk.Menu(c, tearoff=0, bg=t["menu_bg"], fg=t["fg"],
+                       activebackground=t["accent"], activeforeground="#ffffff",
+                       selectcolor=t["fg"], bd=0, relief="flat", font=F_ROW)
+        for lbl in _mon_labels:
+            menu.add_radiobutton(
+                label=lbl, variable=monitor_var, value=lbl,
+                command=lambda: c.itemconfigure(txt, text=monitor_var.get()))
+        c.bind("<Enter>", lambda e: border(t["field_hover"]))
+        c.bind("<Leave>", lambda e: border(t["field_border"]))
+        c.bind("<Button-1>", lambda e: menu.tk_popup(
+            c.winfo_rootx(), c.winfo_rooty() + h + px(2)))
+        return c
+
+    def make_spinner(parent):
+        t = T()
+        w, h = px(100), px(36)
+        split = w - px(30)
+        c, border = field(parent, w, h, cursor="arrow")
+        txt = c.create_text(px(14), h // 2, anchor="w", font=F_ROW, fill=t["fg"])
+        c.create_line(split, px(7), split, h - px(7), fill=t["field_border"])
+        cx = split + (w - split) // 2
+        c.create_image(cx, h // 2 - px(7),
+                       image=chevron_img("up", t["chevron"], t["field_bg"], 13))
+        c.create_image(cx, h // 2 + px(7),
+                       image=chevron_img("down", t["chevron"], t["field_bg"], 13))
+
+        def redraw():
+            c.itemconfigure(txt, text="%.1f" % cur_scan())
+
+        def click(e):
+            if e.x >= split:
+                set_scan(cur_scan() + (SCAN_STEP if e.y < h / 2 else -SCAN_STEP))
+
+        def motion(e):
+            c.configure(cursor="hand2" if e.x >= split else "arrow")
+
+        c.bind("<Button-1>", click)
+        c.bind("<Motion>", motion)
+        c.bind("<MouseWheel>", lambda e: set_scan(
+            cur_scan() + (SCAN_STEP if e.delta > 0 else -SCAN_STEP)))
+        c.bind("<Button-4>", lambda e: set_scan(cur_scan() + SCAN_STEP))
+        c.bind("<Button-5>", lambda e: set_scan(cur_scan() - SCAN_STEP))
+        c.bind("<Enter>", lambda e: border(t["field_hover"]))
+        c.bind("<Leave>", lambda e: border(t["field_border"]))
+        ui["scan_redraw"] = redraw
+        redraw()
+        return c
+
+    def make_hotkey(parent, key_name):
+        """Click-to-record hotkey box. Saves as soon as a full combo is pressed."""
+        t = T()
+        w, h = px(240), px(38)
+        c, border = field(parent, w, h, takefocus=1)
+        txt = c.create_text(px(16), h // 2, anchor="w", font=F_ROW)
+        hk = {"value": settings[key_name], "mods": []}
+
+        def paint(text, active):
+            border(t["accent"] if active else t["field_border"],
+                   2 if active else 1)
+            c.itemconfigure(txt, text=text,
+                            fill=t["hint"] if active else t["fg"])
+
+        def order():
+            return [m for m in ("ctrl", "alt", "shift") if m in hk["mods"]]
+
+        def on_click(_e):
+            c.focus_set()
+            return "break"
+
+        def on_focus_in(_e):
+            hk["mods"] = []
+            paint("Press keys…", True)
+
+        def on_key_press(e):
+            ks = e.keysym
+            if ks == "Escape":
+                root.focus_set()
+            elif ks in MOD_KEYS:
+                if MOD_KEYS[ks] not in hk["mods"]:
+                    hk["mods"].append(MOD_KEYS[ks])
+                paint(pretty_combo("+".join(order())) + " + …", True)
+            else:
+                combo = "+".join(order() + [ks.lower()])
+                hk["value"] = combo
+                settings[key_name] = combo
+                autosave()
+                root.focus_set()
+            return "break"
+
+        def on_key_release(e):
+            ks = e.keysym
+            if ks in MOD_KEYS and MOD_KEYS[ks] in hk["mods"]:
+                hk["mods"].remove(MOD_KEYS[ks])
+
+        def on_focus_out(_e):
+            paint(pretty_combo(hk["value"]), False)
+
+        c.bind("<Button-1>", on_click)
+        c.bind("<FocusIn>", on_focus_in)
+        c.bind("<FocusOut>", on_focus_out)
+        c.bind("<KeyPress>", on_key_press)
+        c.bind("<KeyRelease>", on_key_release)
+        _hotkey_canvases.append(c)
+        paint(pretty_combo(hk["value"]), False)
+        return c
+
+    def make_button(parent, command):
+        t = T()
+        w, h = px(190), px(44)
+        c = tk.Canvas(parent, width=w, height=h, bg=t["win"], bd=0,
+                      highlightthickness=0, cursor="hand2")
+        bg = c.create_image(0, 0, anchor="nw")
+        txt = c.create_text(w // 2, h // 2, font=F_BTN, fill=t["btn_fg"])
+
+        def paint(hover):
+            c.itemconfigure(bg, image=rrect(
+                w, h, 7, t["accent_hover"] if hover else t["accent"], t["win"]))
+
+        c.bind("<Enter>", lambda e: paint(True))
+        c.bind("<Leave>", lambda e: paint(False))
+        c.bind("<Button-1>", lambda e: command())
+        paint(False)
+        return c, (lambda text: c.itemconfigure(txt, text=text))
+
+    # Clicking anywhere outside a hotkey box ends recording.
+    def _blur(e):
+        if e.widget not in _hotkey_canvases:
+            try:
+                root.focus_set()
+            except Exception:
+                pass
+
+    root.bind_all("<Button-1>", _blur, add="+")
+
+    # --- Windows title bar colour ----------------------------------------
+    def style_titlebar():
+        if sys.platform != "win32":
             return
-        new_val = bool(away_mode_var.get())
-        settings["away_mode"] = new_val
-        autosave()
-        if state is not None:
-            state.away_mode = new_val
-            if new_val:
-                state.last_away_press = time.time()
-            log("Away Mode " + ("ON" if new_val else "OFF") + " (via settings).")
+        try:
+            root.update_idletasks()
+            try:
+                hwnd = int(root.wm_frame(), 16)
+            except Exception:
+                hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+            t = T()
+            dwm = ctypes.windll.dwmapi
+            dark = ctypes.c_int(1 if settings.get("dark_mode", True) else 0)
+            if dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), 4) != 0:
+                dwm.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(dark), 4)
 
-    away_mode_var.trace_add("write", _on_away_mode_change)
-    tk.Checkbutton(root, text="Away Mode (anti-idle: taps Up x"
-                              + str(AWAY_PRESS_COUNT) + " every "
-                              + str(AWAY_INTERVAL_SECONDS // 60) + " min)",
-                   variable=away_mode_var).grid(
-        row=13, column=0, columnspan=2, sticky="w", padx=12)
+            def colorref(hexstr):
+                h = hexstr.lstrip("#")
+                r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+                return ctypes.c_int(r | (g << 8) | (b << 16))
 
-    # --- Status + action button -----------------------------------------
-    status_label = tk.Label(root, text="", font=bold)
-    status_label.grid(row=14, column=0, columnspan=2, sticky="w",
-                      padx=12, pady=(14, 2))
+            # Windows 11 only; silently ignored on Windows 10.
+            dwm.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(colorref(t["win"])), 4)
+            dwm.DwmSetWindowAttribute(hwnd, 36, ctypes.byref(colorref(t["fg"])), 4)
+            # SWP_NOSIZE|NOMOVE|NOZORDER|NOACTIVATE|FRAMECHANGED -> repaint frame
+            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                              0x1 | 0x2 | 0x4 | 0x10 | 0x20)
+        except Exception:
+            pass
 
-    action_btn = tk.Button(root, text="Start", width=18)
-    action_btn.grid(row=15, column=0, columnspan=2, pady=(2, 4))
-
+    # --- Status + action ---------------------------------------------------
     def refresh_status():
+        if "status" not in ui:
+            return
+        t = T()
         if state is None:
-            status_label.config(text="Status:  not started yet", fg="#666666")
-            action_btn.config(text="Start")
+            color, text, btn = t["idle"], "Not started", "Start"
         elif getattr(state, "paused", False):
-            status_label.config(text="Status:  PAUSED", fg="#b06000")
-            action_btn.config(text="Resume scanning")
+            color, text, btn = t["paused"], "Paused", "Resume scanning"
         else:
-            status_label.config(text="Status:  RUNNING", fg="#1a7c30")
-            action_btn.config(text="Pause scanning")
-        # Mirror state.away_mode into the checkbox (so a hotkey/tray toggle
-        # is reflected here too).
-        if state is not None and bool(state.away_mode) != bool(away_mode_var.get()):
-            _syncing_away[0] = True
-            away_mode_var.set(bool(state.away_mode))
-            _syncing_away[0] = False
-        # Mirror state.console_visible into the hide-console checkbox.
-        # The checkbox is "hidden" = True when console is NOT visible.
+            color, text, btn = t["run"], "Running", "Pause scanning"
+        ui["dot"].configure(image=dot_img(color, t["win"]))
+        ui["status"].configure(text=text, fg=color)
+        ui["btn_text"](btn)
+        # Mirror changes made elsewhere (hotkey / tray) into the toggles.
         if state is not None:
-            want_hidden = bool(not state.console_visible)
-            if want_hidden != bool(hide_console_var.get()):
-                _syncing_hide[0] = True
-                hide_console_var.set(want_hidden)
-                _syncing_hide[0] = False
+            _sync["on"] = True
+            try:
+                if bool(state.away_mode) != bool(away_var.get()):
+                    away_var.set(bool(state.away_mode))
+                want_hidden = not state.console_visible
+                if want_hidden != bool(hide_var.get()):
+                    hide_var.set(want_hidden)
+            finally:
+                _sync["on"] = False
 
     def on_action():
         if state is None:
@@ -593,11 +935,104 @@ def show_settings_window(settings, state=None):
                 else "RESUMED (via settings window).")
             refresh_status()
 
-    action_btn.config(command=on_action)
-    refresh_status()
+    # --- Build (re-run on theme change) -----------------------------------
+    away_desc = ("Taps " + AWAY_KEY.capitalize() + " "
+                 + ("twice" if AWAY_PRESS_COUNT == 2
+                    else str(AWAY_PRESS_COUNT) + " times")
+                 + " every " + str(AWAY_INTERVAL_SECONDS // 60) + " minutes")
 
-    # While running, poll state so pause changes from elsewhere (tray, hotkey)
-    # are reflected in the status label.
+    def build():
+        t = T()
+        old = ui.get("container")
+        if old is not None:
+            old.destroy()
+        ui.clear()
+        _img_cache.clear()
+        del _hotkey_canvases[:]
+        ui["card_w"] = px(520)
+
+        root.configure(bg=t["win"])
+        cont = tk.Frame(root, bg=t["win"])
+        cont.pack(fill="both", expand=True)
+        ui["container"] = cont
+
+        body = tk.Frame(cont, bg=t["win"])
+        body.pack(fill="x", padx=px(14), pady=(px(14), px(4)))
+        tk.Label(body, text="Settings", font=F_TITLE, bg=t["win"], fg=t["fg"],
+                 anchor="w").pack(fill="x", padx=px(4))
+        tk.Label(body, text="Manage invites, scanning and shortcuts.",
+                 font=F_SUB, bg=t["win"], fg=t["hint"], anchor="w").pack(
+                     fill="x", padx=px(4), pady=(0, px(10)))
+
+        c = Card(body, "Auto-accept")
+        c.toggle_row("Contracts", contracts_var, "Contract Shared popups")
+        c.toggle_row("Party invites", party_var)
+        c.toggle_row("Friend requests", friend_var)
+
+        c = Card(body, "Scanning")
+        r = c.row("Monitor")
+        make_dropdown(r).pack(side="right")
+        r = c.row("Scan interval")
+        holder = tk.Frame(r, bg=t["card"], width=px(210), height=px(36))
+        holder.pack_propagate(False)
+        holder.pack(side="right")
+        make_spinner(holder).pack(side="left")
+        tk.Label(holder, text="s", font=F_ROW, bg=t["card"],
+                 fg=t["fg"]).pack(side="left", padx=px(12))
+        c.toggle_row("Away Mode", away_var, away_desc)
+
+        c = Card(body, "Hotkeys")
+        r = c.row("Away Mode")
+        make_hotkey(r, "away_hotkey").pack(side="right")
+        r = c.row("Pause scanning")
+        make_hotkey(r, "pause_hotkey").pack(side="right")
+        c.note("Click a shortcut to record a new combination.")
+
+        c = Card(body, "Appearance")
+        c.toggle_row("Dark mode", dark_var)
+
+        c = Card(body, "Advanced", collapsible=True)
+        c.toggle_row("Hide console", hide_var,
+                     "Run in the system tray after starting")
+        c.toggle_row("Detailed logging", verbose_var)
+
+        # Footer
+        tk.Frame(cont, bg=t["card_border"], height=max(1, px(1))).pack(fill="x")
+        foot = tk.Frame(cont, bg=t["win"])
+        foot.pack(fill="x", padx=px(18), pady=px(10))
+        dot = tk.Label(foot, bg=t["win"])
+        dot.pack(side="left")
+        st = tk.Label(foot, font=F_STATUS, bg=t["win"])
+        st.pack(side="left", padx=(px(10), 0))
+        tk.Label(foot, text="v" + VERSION, font=F_DESC, bg=t["win"],
+                 fg=t["hint"]).pack(side="right")
+        btn, set_text = make_button(foot, on_action)
+        btn.pack(side="right", padx=(0, px(22)))
+        ui.update(dot=dot, status=st, btn_text=set_text)
+
+        # Size every card now (not on the first <Configure>) so the window
+        # has its final height before it is centred and shown.
+        root.update_idletasks()
+        for card in ui.get("cards", []):
+            card._layout()
+        root.update_idletasks()
+
+        style_titlebar()
+        refresh_status()
+
+    build()
+
+    # Centre on screen, then show.
+    root.update_idletasks()
+    w, h = root.winfo_reqwidth(), root.winfo_reqheight()
+    x = max(0, (root.winfo_screenwidth() - w) // 2)
+    y = max(0, (root.winfo_screenheight() - h) // 2 - px(20))
+    root.geometry("+%d+%d" % (x, y))
+    root.deiconify()
+    root.lift()
+    style_titlebar()
+
+    # While running, poll state so changes from the tray / hotkeys show here.
     if state is not None:
         def poll():
             try:
@@ -607,14 +1042,9 @@ def show_settings_window(settings, state=None):
                 pass
         root.after(500, poll)
 
-    # --- Version label (bottom-right) -----------------------------------
-    tk.Label(root, text="v" + VERSION, fg="gray").grid(
-        row=16, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 8))
-
-    # Closing the X just closes the window; auto-save already persisted.
     root.protocol("WM_DELETE_WINDOW", root.destroy)
     try:
-        root.focus_set()            # so no field grabs focus on open
+        root.focus_set()
     except Exception:
         pass
     root.mainloop()
