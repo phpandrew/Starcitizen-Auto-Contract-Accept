@@ -112,6 +112,7 @@ DEFAULT_SETTINGS = {
     "monitor_index": "middle",  # "middle" auto-picks, or an int (mss id)
     "away_mode": False,         # start with Away Mode on? (anti-idle)
     "dark_mode": True,          # dark theme for the Settings window
+    "collapsed_sections": [],   # Settings-window cards the user collapsed
 }
 
 # --- System tray -----------------------------------------------------------
@@ -567,7 +568,15 @@ def show_settings_window(settings, state=None):
 
     SCAN_MIN, SCAN_MAX, SCAN_STEP = 0.5, 5.0, 0.5
     ui = {}
-    _ui_state = {"advanced_open": True}
+    def is_open(title):
+        return title not in (settings.get("collapsed_sections") or [])
+
+    def set_open(title, is_open_now):
+        cur = [x for x in (settings.get("collapsed_sections") or []) if x != title]
+        if not is_open_now:
+            cur.append(title)
+        settings["collapsed_sections"] = cur
+        autosave()
 
     def set_scan(v):
         v = min(SCAN_MAX, max(SCAN_MIN, v))
@@ -603,7 +612,7 @@ def show_settings_window(settings, state=None):
         """Rounded card: a canvas with a Pillow background and a Frame on top."""
         PADX, PADT, PADB = 18, 11, 4
 
-        def __init__(self, parent, title, collapsible=False):
+        def __init__(self, parent, title, collapsible=True):
             t = T()
             self.t = t
             self.canvas = tk.Canvas(parent, width=ui["card_w"], height=px(40),
@@ -631,15 +640,15 @@ def show_settings_window(settings, state=None):
 
                 def paint():
                     chev.configure(image=chevron_img(
-                        "down" if _ui_state["advanced_open"] else "right",
+                        "down" if is_open(title) else "right",
                         t["chevron"], t["card"]))
-                    if _ui_state["advanced_open"]:
+                    if is_open(title):
                         self.body.pack(fill="x")
                     else:
                         self.body.pack_forget()
 
                 def flip(_e=None):
-                    _ui_state["advanced_open"] = not _ui_state["advanced_open"]
+                    set_open(title, not is_open(title))
                     paint()
 
                 for w in (head, title_lbl, chev):
@@ -991,7 +1000,7 @@ def show_settings_window(settings, state=None):
         c = Card(body, "Appearance")
         c.toggle_row("Dark mode", dark_var)
 
-        c = Card(body, "Advanced", collapsible=True)
+        c = Card(body, "Advanced")
         c.toggle_row("Hide console", hide_var,
                      "Run in the system tray after starting")
         c.toggle_row("Detailed logging", verbose_var)
